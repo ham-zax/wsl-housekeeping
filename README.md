@@ -1,7 +1,8 @@
 # WSL housekeeping
 
-Two dependency-free Python scripts for WSL 2: conservative disk housekeeping
-and idle RAM-cache reclamation. Both have fixture-based safety tests.
+Conservative disk housekeeping and idle RAM-cache reclamation for WSL 2,
+plus a Windows housekeeping companion. The two Python scripts and Windows
+script have fixture-based safety tests.
 
 Requires Linux Python 3.10+, Git, systemd, and Linux memory pressure statistics
 at `/proc/pressure/memory`. Package managers are optional: missing tools are
@@ -131,6 +132,22 @@ sudo systemctl disable --now wsl-reclaim.timer
 
 The RAM installer saves previous scripts and units under
 `/usr/local/share/wsl-housekeeping/backups/` before replacing them.
+
+## Windows housekeeping
+
+The [Windows companion](windows/README.md) handles stale Windows temp files,
+diagnostic dumps, download staging, and explicit application caches. It runs
+two minutes after Windows login or wake, keeping recent files and crash evidence.
+It preserves VM/swap disks and application data, and leaves Linux cleanup to the
+WSL housekeeping script.
+
+From the `windows` directory in Windows PowerShell:
+
+```powershell
+.\Cleanup-WSLDumps-OnStartOrWake-v2.ps1 -Mode Run        # preview
+.\install.ps1                                        # schedule login/wake cleanup
+.\test-housekeeping.ps1                              # disposable fixtures
+```
 
 ## Verification
 
