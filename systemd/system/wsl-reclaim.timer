@@ -1,0 +1,10 @@
+[Unit]
+Description=Return WSL page cache during sustained idle periods
+
+[Timer]
+OnBootSec=5min
+OnUnitInactiveSec=15min
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

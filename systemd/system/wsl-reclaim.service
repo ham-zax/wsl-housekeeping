@@ -1,0 +1,8 @@
+[Unit]
+Description=Return idle WSL page cache to Windows
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/wsl-reclaim
+Nice=19
+IOSchedulingClass=idle
