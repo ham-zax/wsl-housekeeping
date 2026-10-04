@@ -90,6 +90,16 @@ journalctl --user -u wsl-housekeeping.service -n 50
 systemctl --user disable --now wsl-housekeeping.timer
 ```
 
+## Optional user services
+
+Reusable personal systemd user-service bundles live in [services](services/README.md),
+separate from the core disk and RAM housekeeping timers. The ZenGate model-list
+sync bundle can be installed from the repository root with:
+
+~~~bash
+./services/zengate-model-sync/install.sh
+~~~
+
 ## RAM-cache reclamation
 
 ```bash

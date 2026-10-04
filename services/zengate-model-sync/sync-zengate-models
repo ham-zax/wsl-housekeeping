@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+"""Reconcile OpenCode and Pi ZenGate model entries with the ARM gateway."""
+import copy
+import json
+import os
+import pathlib
+import re
+import stat
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+
+HOME = pathlib.Path.home()
+CONFIG_HOME = pathlib.Path(os.environ.get('XDG_CONFIG_HOME', str(HOME / '.config'))).expanduser()
+STATE_HOME = pathlib.Path(os.environ.get('XDG_STATE_HOME', str(HOME / '.local/state'))).expanduser()
+OPENCODE = CONFIG_HOME / 'opencode/opencode.json'
+PI_MODELS = HOME / '.pi/agent/models.json'
+CACHE = STATE_HOME / 'opencode2api-deployment/model-metadata.json'
+BUNDLED_CACHE = pathlib.Path(__file__).resolve().with_name('model-metadata.json')
+
+
+def read_json(path):
+    with path.open(encoding='utf-8') as stream:
+        return json.load(stream)
+
+
+def atomic_json(path, value):
+    mode = stat.S_IMODE(path.stat().st_mode)
+    descriptor, temporary = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
+    try:
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            json.dump(value, stream, indent=2)
+            stream.write('\n')
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+def display_name(model_id):
+    return ' '.join(part.capitalize() for part in re.split(r'[-_.]+', model_id)) + ' (ZenGate)'
+
+
+def main():
+    opencode = read_json(OPENCODE)
+    pi_config = read_json(PI_MODELS)
+    opencode_provider = opencode['provider']['zengate']
+    options = opencode_provider['options']
+    endpoint = options['baseURL'].rstrip('/')
+    if not endpoint.endswith('/v1'):
+        raise ValueError('ZenGate baseURL must end in /v1')
+    request = urllib.request.Request(
+        endpoint + '/models',
+        headers={'Authorization': 'Bearer ' + options['apiKey'], 'Accept': 'application/json'},
+    )
+    with urllib.request.urlopen(request, timeout=20) as response:
+        payload = json.load(response)
+    records = payload.get('data')
+    if not isinstance(records, list) or not records:
+        raise ValueError('gateway returned an empty or invalid model catalog; keeping current configs')
+    ids = [item.get('id') for item in records if isinstance(item, dict)]
+    if len(ids) != len(records) or any(not isinstance(value, str) or not value or len(value) > 255 or any(ord(ch) < 33 for ch in value) for value in ids):
+        raise ValueError('gateway returned an invalid model ID; keeping current configs')
+    if len(set(ids)) != len(ids):
+        raise ValueError('gateway returned duplicate model IDs; keeping current configs')
+
+    pi_provider = pi_config['providers']['opencode2api']
+    templates = {}
+    if CACHE.exists():
+        templates = read_json(CACHE)
+    elif BUNDLED_CACHE.exists():
+        templates = read_json(BUNDLED_CACHE)
+    templates = copy.deepcopy(templates)
+    for model_id, definition in opencode_provider.get('models', {}).items():
+        templates.setdefault(model_id, {}).setdefault('opencode', copy.deepcopy(definition))
+    for definition in pi_provider.get('models', []):
+        model_id = definition.get('id')
+        if model_id:
+            templates.setdefault(model_id, {}).setdefault('pi', copy.deepcopy(definition))
+
+    new_opencode = copy.deepcopy(opencode)
+    new_pi = copy.deepcopy(pi_config)
+    new_op_models = {}
+    new_pi_models = []
+    for model_id in ids:
+        saved = templates.get(model_id, {})
+        pi_model = copy.deepcopy(saved.get('pi', {}))
+        op_model = copy.deepcopy(saved.get('opencode', {}))
+        if not pi_model:
+            pi_model = {
+                'id': model_id,
+                'name': display_name(model_id),
+                'reasoning': False,
+                'input': ['text'],
+                'contextWindow': 131072,
+                'maxTokens': 16384,
+                'cost': {'input': 0, 'output': 0, 'cacheRead': 0, 'cacheWrite': 0},
+            }
+        if not op_model:
+            op_model = {'name': display_name(model_id), 'limit': {'context': 131072, 'output': 16384}}
+        inputs = set(pi_model.get('input', ['text']))
+        op_model.pop('reasoning', None)
+        op_model.pop('capabilities', None)
+        op_model['modalities'] = {'input': sorted(inputs), 'output': ['text']}
+        op_model['cost'] = {'input': 0, 'output': 0, 'cache_read': 0, 'cache_write': 0}
+        pi_model['id'] = model_id
+        pi_model['name'] = saved.get('pi', {}).get('name', pi_model.get('name', display_name(model_id)))
+        if not op_model.get('name'):
+            op_model['name'] = display_name(model_id)
+        new_pi_models.append(pi_model)
+        new_op_models[model_id] = op_model
+        templates.setdefault(model_id, {})['pi'] = copy.deepcopy(pi_model)
+        templates.setdefault(model_id, {})['opencode'] = copy.deepcopy(op_model)
+
+    new_opencode['provider']['zengate']['models'] = new_op_models
+    new_pi['providers']['opencode2api']['name'] = 'ZenGate'
+    new_pi['providers']['opencode2api']['baseUrl'] = endpoint
+    new_pi['providers']['opencode2api']['apiKey'] = options['apiKey']
+    new_pi['providers']['opencode2api']['models'] = new_pi_models
+    atomic_json(OPENCODE, new_opencode)
+    atomic_json(PI_MODELS, new_pi)
+    CACHE.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if CACHE.exists():
+        atomic_json(CACHE, templates)
+    else:
+        descriptor = os.open(CACHE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+            json.dump(templates, stream, indent=2)
+            stream.write('\n')
+    print('ZenGate catalog synced: %d models' % len(ids))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError, urllib.error.URLError) as error:
+        print('ZenGate model sync failed (%s); current model lists were retained where no write had completed.' % type(error).__name__, file=sys.stderr)
+        sys.exit(1)

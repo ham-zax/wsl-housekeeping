@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodically refresh the ZenGate model list
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=zengate-model-sync.service
+
+[Install]
+WantedBy=timers.target

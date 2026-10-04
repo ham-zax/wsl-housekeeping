@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh ZenGate model lists from the configured gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/wsl-housekeeping/services/zengate-model-sync/sync-zengate-models
