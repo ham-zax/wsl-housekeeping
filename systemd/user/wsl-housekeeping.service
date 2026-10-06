@@ -1,9 +1,9 @@
 [Unit]
-Description=Clean stale WSL package caches and safe worktrees
+Description=Clean safe WSL worktrees, build artifacts, caches, and temp files
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/wsl-housekeeping --apply
+ExecStart=%h/.local/bin/wsl-housekeeping --apply --daily-when-idle
 Nice=19
 IOSchedulingClass=idle
 TimeoutStartSec=30min

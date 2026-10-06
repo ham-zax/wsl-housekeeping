@@ -1,10 +1,10 @@
 [Unit]
-Description=Daily conservative WSL disk housekeeping
+Description=Check every 30 minutes whether daily WSL housekeeping is due and the CPU is idle
 
 [Timer]
-OnCalendar=daily
-Persistent=true
-RandomizedDelaySec=30min
+OnBootSec=15min
+OnUnitActiveSec=30min
+RandomizedDelaySec=2min
 AccuracySec=1min
 
 [Install]

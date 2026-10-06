@@ -23,13 +23,12 @@ Apply cleanup:
 python3 housekeeping.py --apply
 ```
 
-The default repository roots are `~/repo` and `~/worktrees`. The script discovers
+The default repository roots are `~/repo`, `~/work`, and `~/worktrees`. The script discovers
 Git repositories directly inside those roots, then inspects their registered
 worktrees. Specify other roots with repeated `--root` arguments:
 
 ```bash
 python3 housekeeping.py --root ~/projects --root ~/branches
-python3 housekeeping.py --days 7 --cache-days 14
 ```
 
 A worktree qualifies only when all of these conditions hold:
@@ -46,20 +45,89 @@ A worktree qualifies only when all of these conditions hold:
 - No inspected live process references it through its command, working
   directory, executable, or open files.
 
-Branches and commits are retained. Git removal is never forced. Missing
-registrations are pruned only when every missing registration in that repository
-passes the age, scope, lock, and retained-commit checks.
+Branches and commits are retained. Missing registrations are pruned only when
+every missing registration in that repository passes the age, scope, lock, and
+retained-commit checks.
+
+Worktrees kept only for uncommitted, untracked, or ignored local files, or for a
+commit not otherwise retained, are archived and then removed once the index,
+HEAD reflog, checkout directory, and every tracked file are untouched for three
+days (`--archive-days`) and no live process references them. Each archive under
+`~/.local/state/wsl-housekeeping/worktree-archives/<stamp>-<name>/` contains:
+
+- `refs/housekeeping/<stamp>-<name>` in the repository, pinning HEAD;
+- `tracked.patch`, the binary `git diff HEAD`;
+- `untracked.tar.gz`, untracked and ignored files except recognized generated
+  directories such as `node_modules` or `.venv`;
+- a `README` with the restore commands:
+
+```bash
+git -C REPO worktree add PATH refs/housekeeping/STAMP-NAME
+git -C PATH apply --binary ARCHIVE/tracked.patch
+tar -xzf ARCHIVE/untracked.tar.gz -C PATH
+```
+
+A worktree whose local files exceed 1 GiB (`--archive-max-gib`) is kept.
+`--skip-archive` disables the rule. Locked worktrees are never archived.
+
+For a checkout idle for at least seven days (`--artifact-days`), the script can
+also remove ignored `target`, `node_modules`, `.next`, `.turbo`, or `.venv`
+directories up to three levels deep when a manifest that recreates them sits
+beside them: `Cargo.toml`/`Cargo.lock`, `package.json` or a JavaScript lockfile,
+or `pyproject.toml`, `requirements.txt`, `setup.py`, or a Python lockfile.
+Uncommitted edits do not block this, because only regenerable directories are
+removed. It checks the Git index, HEAD reflog, tracked-file timestamps, the
+artifact's newest file, and live process references. This applies to primary
+checkouts and unmerged worktrees; it keeps their source files, commits, and
+branches. `--skip-artifacts` disables this rule.
+
+Rust targets above 5 GiB get a separate rule: incremental compiler caches idle
+for two days can be removed even when the checkout has source edits. Compiled
+binaries are kept. The target must be ignored by Git, contain no tracked files,
+and have a nearby Cargo.lock. Live project references or package managers block
+the cleanup. Set `--rust-cache-days` or `--rust-target-max-gib` to adjust it.
 
 Cache cleanup uses `uv cache prune` and `pnpm store prune` to remove dangling or
-unreferenced entries. Pip, npm, and Yarn download caches are cleared only when
-their contents have not been updated for seven days. Individual old npx
-environments and Node download archives use the same seven-day cutoff.
+unreferenced entries. A uv cache over 2 GiB is cleared. Pip, npm, and Yarn
+download caches are cleared after two idle days or when they exceed 2 GiB.
+Bun's download cache uses the same rule, removing only its configured cache
+directory. Bun's native removal command can also touch other caches.
+Individual old npx environments and Node download archives use the two-day
+cutoff. Active package managers and caches they reference are protected.
 
-The script keeps recently updated download caches, installed tools and Python
-runtimes, model files, browser binaries, and user data. It skips cache operations
-while a package manager is running or a process references the cache. It does
-not delete source files, uninstall packages, clean Rust builds, or clear the
-entire `~/.cache` directory.
+Other `~/.cache` entries are treated as disposable once nothing inside them has
+been written for 14 days (`--idle-cache-days`; `--skip-idle-caches` disables
+it). Access times are ignored because file indexers read every file daily.
+Hugging Face models, Playwright, Puppeteer, and Cypress browsers, and x-growth
+browser run profiles are judged per model, browser version, or run. The uv,
+pip, and Yarn caches use the rules above instead. Downloaded Codex app-server
+releases are removed except `current`, the newest other release, and any
+release a live process uses.
+
+The script also removes your own `/tmp` entries untouched for at least one day.
+It checks the newest file inside each entry and live process references before
+removing anything. Protected socket and session directories are skipped. Claude
+scratch subdirectories are considered individually, so a recent session does
+not keep old scratch from the same parent forever. `/tmp` above 16 GiB after
+eligible cleanup is reported for inspection; recent or active files are kept.
+
+Each run reports the WSL VHD's allocated size and Windows C: free space before
+and after cleanup. The 150 GiB WSL budget raises a warning when exceeded.
+It is an alert, not a hard disk quota: applications can write faster than
+housekeeping can remove safe disposable files. A real VHD maximum requires an
+offline WSL disk resize, which this running-session timer cannot perform.
+When the budget remains exceeded, the report lists the largest other caches
+for inspection without counting their size as reclaimable space.
+
+Applied runs remove all eligible entries without a per-run size cap.
+Completed deletions and cache actions are recorded as JSON Lines under
+`~/.local/state/wsl-housekeeping/deletions-*.jsonl` with paths and sizes before
+cleanup. Cache actions may reclaim less than their recorded size.
+
+The script keeps recently written caches, installed tools and Python runtimes,
+and user data outside `~/.cache`. It skips cache operations while a package
+manager is running or a process references the cache. Source edits are deleted
+only after being archived as described above.
 
 Concurrent runs are prevented with a per-user lock. An inability to inspect an
 application process or verify Git state stops cleanup rather than assuming it
@@ -75,9 +143,13 @@ cd wsl-housekeeping
 ```
 
 This installs `~/.local/bin/wsl-housekeeping` and enables a user timer that runs
-once daily, shortly after midnight with up to 30 minutes of randomized delay.
-Missed runs are caught up when the user manager starts. WSL must be running for
-the timer to execute. If the user manager needs to remain active after logout,
+once a day at whatever time the machine is idle. The timer fires 15 minutes
+after the user manager starts and then every 30 minutes; each check exits with
+`SKIP` unless the last successful `--apply` run is at least 20 hours old and the
+5-minute load average is at most 0.25 per CPU (`--max-load`). After 72 hours
+without success it runs regardless of load. A failed run leaves the stamp
+(`~/.local/state/wsl-housekeeping/last-success`) unchanged, so it retries on the
+next check. WSL must be running for the timer to execute. If the user manager needs to remain active after logout,
 enable lingering for your user with `sudo loginctl enable-linger "$USER"`.
 Ensure `~/.local/bin` is in your shell's `PATH` to use the short command below;
 the timer invokes the installed command by its full path.
