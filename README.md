@@ -134,7 +134,7 @@ application process or verify Git state stops cleanup rather than assuming it
 is safe. The systemd user supervisor and its PAM helper are recognized as
 supervisors; their application children are still inspected.
 
-### Daily automatic cleanup
+### Automatic cleanup
 
 ```bash
 git clone https://github.com/ham-zax/wsl-housekeeping.git
@@ -143,11 +143,12 @@ cd wsl-housekeeping
 ```
 
 This installs `~/.local/bin/wsl-housekeeping` and enables a user timer that runs
-once a day at whatever time the machine is idle. The timer fires 15 minutes
-after the user manager starts and then every 30 minutes; each check exits with
-`SKIP` unless the last successful `--apply` run is at least 20 hours old and the
-5-minute load average is at most 0.25 per CPU (`--max-load`). After 72 hours
-without success it runs regardless of load. A failed run leaves the stamp
+about every 30 minutes. The timer fires 15 minutes after the user manager starts
+and then every 30 minutes; each check exits with `SKIP` unless the last
+successful `--apply` run is at least 24 minutes old (`--interval-hours 0.4`) and
+the 5-minute load average is at most 0.7 per CPU (`--max-load 0.7`). Without
+these flags the script defaults to 20 hours and 0.7 per CPU. After 72
+hours without success it runs regardless of load. A failed run leaves the stamp
 (`~/.local/state/wsl-housekeeping/last-success`) unchanged, so it retries on the
 next check. WSL must be running for the timer to execute. If the user manager needs to remain active after logout,
 enable lingering for your user with `sudo loginctl enable-linger "$USER"`.

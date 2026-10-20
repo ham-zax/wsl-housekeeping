@@ -14,7 +14,14 @@ param(
     [int]$OlderThanMinutes = 10080,
     [ValidateRange(1, 20)]
     [int]$KeepNewest = 3,
-    [switch]$Apply
+    [switch]$Apply,
+    # Opt-in: also remove stale installers and archives from Downloads. Every deletion is logged by full path.
+    [switch]$CleanDownloads,
+    [switch]$IncludeArchives,
+    [ValidateRange(7, 365)]
+    [int]$DownloadsOlderThanDays = 14,
+    [ValidateRange(1, 200)]
+    [int]$LowSpaceGB = 25
 )
 
 Set-StrictMode -Version Latest
@@ -104,7 +111,7 @@ function Remove-CleanupFile {
         [System.IO.File]::Delete($path)
         $script:RemovedBytes += $size
         $script:RemovedFiles++
-        Write-Log "DELETED: $path ($size bytes)"
+        Write-Log ("DELETED: {0} ({1} bytes, modified {2:yyyy-MM-dd})" -f $path, $size, $fresh.LastWriteTime)
     } catch { Write-Log "KEEP locked or inaccessible file: $path ($($_.Exception.Message))" }
     finally { if ($null -ne $handle) { $handle.Dispose() } }
 }
@@ -119,6 +126,14 @@ function Invoke-FileGroup {
         try { Remove-CleanupFile -File $file -Cutoff $Cutoff -Apply:$Apply }
         catch { Write-Log "KEEP changed or inaccessible file: $($file.FullName)" }
     }
+}
+
+function Write-FreeSpace {
+    param([string]$Label)
+    $drive = Get-PSDrive -Name C -ErrorAction Stop
+    $freeGB = [math]::Round($drive.Free / 1GB, 2)
+    $warn = if ($freeGB -lt $LowSpaceGB) { " LOW SPACE (< $LowSpaceGB GB): reclaim WSL vhdx (fstrim in guest) and review caches" } else { '' }
+    Write-Log ("C: free {0}: {1} GB{2}" -f $Label, $freeGB, $warn)
 }
 
 function Invoke-Cleanup {
@@ -140,15 +155,32 @@ function Invoke-Cleanup {
         Invoke-FileGroup -Root $TempDirectory -Patterns 'wsl-crash-*.dmp' -Cutoff $cutoff -KeepDiagnostics -Apply:$Apply
         Invoke-FileGroup -Root (Join-Path $env:LOCALAPPDATA 'CrashDumps') -Patterns '*.dmp' -Cutoff $cutoff -KeepDiagnostics -Apply:$Apply
         Invoke-FileGroup -Root (Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data\Crashpad\reports') -Patterns '*.dmp' -Cutoff $cutoff -KeepDiagnostics -Apply:$Apply
-        Invoke-FileGroup -Root (Join-Path $TempDirectory 'DiagOutputDir') -Patterns '*.etl' -Cutoff $cutoff -Recurse -Apply:$Apply
+        Write-FreeSpace 'before'
+        # Remote Desktop traces regrow every session, so they get a 1-day cutoff instead of the default.
+        Invoke-FileGroup -Root (Join-Path $TempDirectory 'DiagOutputDir') -Patterns '*.etl' -Cutoff (Get-Date).AddDays(-1) -Recurse -Apply:$Apply
+
+        if ($CleanDownloads) {
+            # Installers and archives only; documents, media and folders are never touched.
+            # Top level plus the 'Programs' subfolder. Creation time must also be old, so copied or moved files survive.
+            $downloads = Join-Path $env:USERPROFILE 'Downloads'
+            $downloadsCutoff = (Get-Date).AddDays(-$DownloadsOlderThanDays)
+            $installerPatterns = @('*.exe', '*.msi', '*.msix', '*.msixbundle', '*.appx', '*.appxbundle', '*.deb', '*.rpm', '*.apk', '*.dmg')
+            # Archives often hold project or work files, so they need their own opt-in.
+            if ($IncludeArchives) {
+                $installerPatterns += '*.iso', '*.zip', '*.7z', '*.rar', '*.tar', '*.gz', '*.tgz', '*.xz', '*.bz2'
+            }
+            Write-Log "Downloads: installers/archives older than $DownloadsOlderThanDays days (cutoff $($downloadsCutoff.ToString('o')))"
+            Invoke-FileGroup -Root $downloads -Patterns $installerPatterns -Cutoff $downloadsCutoff -Apply:$Apply
+            Invoke-FileGroup -Root (Join-Path $downloads 'Programs') -Patterns $installerPatterns -Cutoff $downloadsCutoff -Recurse -Apply:$Apply
+        }
         # Only loose, old files of known temporary types; never recursively remove Temp directories.
         Invoke-FileGroup -Root $TempDirectory -Patterns '*.tmp', '*.temp', '*.log' -Cutoff $cutoff -Apply:$Apply
 
         $apps = @(
             @{ Name='VS Code staging'; Busy=@('Code', 'Code - Insiders', 'VSCodium'); Root=(Join-Path $env:USERPROFILE 'vscode-remote-wsl'); Sub=@(''); Patterns=@('*.tar.gz', '*.tgz', '*.zip') },
             @{ Name='Zoom'; Busy=@('Zoom', 'ZoomInstaller', 'ZoomUpdate'); Root=(Join-Path $env:APPDATA 'Zoom'); Sub=@('tmp_bin', 'ZoomDownload'); Patterns=@('*.exe', '*.msi', '*.zip') },
-            @{ Name='Stremio'; Busy=@('stremio', 'stremio-server', 'node'); Root=(Join-Path $env:APPDATA 'stremio'); Sub=@('Cache', 'GPUCache', 'Code Cache'); Patterns=@('*') },
-            @{ Name='Notion'; Busy=@('Notion'); Root=(Join-Path $env:APPDATA 'Notion'); Sub=@('Cache', 'GPUCache', 'Code Cache', 'DawnCache'); Patterns=@('*') }
+            @{ Name='Stremio'; Busy=@('stremio', 'stremio-server', 'node'); Root=(Join-Path $env:APPDATA 'stremio'); Sub=@('Cache', 'Code Cache'); Patterns=@('*') },
+            @{ Name='Notion'; Busy=@('Notion'); Root=(Join-Path $env:APPDATA 'Notion'); Sub=@('Cache', 'Code Cache', 'DawnCache'); Patterns=@('*') }
         )
         foreach ($app in $apps) {
             if (@($processNames | Where-Object { $app.Busy -contains $_ }).Count -gt 0) {
@@ -159,6 +191,30 @@ function Invoke-Cleanup {
                 Invoke-FileGroup -Root $root -Patterns $app.Patterns -Cutoff $cutoff -Recurse -Apply:$Apply
             }
         }
+        # Browser caches only. Profile data (cookies, Login Data, Local Storage, IndexedDB) is never in this allowlist,
+        # so logins survive. A browser that is running is skipped entirely.
+        $browsers = @(
+            @{ Name='Chrome'; Busy=@('chrome'); Root=(Join-Path $env:LOCALAPPDATA 'Google\Chrome\User Data') },
+            @{ Name='Edge';   Busy=@('msedge'); Root=(Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\User Data') },
+            @{ Name='Brave';  Busy=@('brave');  Root=(Join-Path $env:LOCALAPPDATA 'BraveSoftware\Brave-Browser\User Data') }
+        )
+        # GPU/shader caches are deliberately excluded: clearing them only causes stutter while they rebuild.
+        $browserCacheDirs = 'Cache', 'Code Cache', 'Service Worker\CacheStorage', 'Service Worker\ScriptCache'
+        foreach ($browser in $browsers) {
+            if (-not (Test-Path -LiteralPath $browser.Root)) { continue }
+            if (@($processNames | Where-Object { $browser.Busy -contains $_ }).Count -gt 0) {
+                Write-Log "KEEP $($browser.Name) caches: browser is running"; continue
+            }
+            $profiles = @(Get-ChildItem -LiteralPath $browser.Root -Directory -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' })
+            foreach ($profileDir in $profiles) {
+                foreach ($cacheDir in $browserCacheDirs) {
+                    Invoke-FileGroup -Root (Join-Path $profileDir.FullName $cacheDir) -Patterns '*' -Cutoff $cutoff -Recurse -Apply:$Apply
+                }
+            }
+        }
+
+        Write-FreeSpace 'after'
         Write-Log ("=== Finished: deleted {0} file(s), {1:N2} MiB. ===" -f $script:RemovedFiles, ($script:RemovedBytes / 1MB))
     } finally {
         if ($acquired) { $mutex.ReleaseMutex() }
@@ -210,6 +266,8 @@ function Install-CleanupTask {
         '-File "{0}" -Mode Run -Apply -OlderThanMinutes {1} -KeepNewest {2}' -f `
         $InstalledScript, $OlderThanMinutes, $KeepNewest
     )
+    if ($CleanDownloads) { $arguments += " -CleanDownloads -DownloadsOlderThanDays $DownloadsOlderThanDays" }
+    if ($IncludeArchives) { $arguments += ' -IncludeArchives' }
 
     $xmlPowerShellPath = ConvertTo-XmlSafeText $powerShellPath
     $xmlArguments = ConvertTo-XmlSafeText $arguments
@@ -244,6 +302,11 @@ function Install-CleanupTask {
       <Delay>PT2M</Delay>
       <UserId>$xmlUserName</UserId>
     </LogonTrigger>
+    <CalendarTrigger>
+      <StartBoundary>2026-01-01T12:30:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay>
+    </CalendarTrigger>
     <EventTrigger>
       <Enabled>true</Enabled>
       <Delay>PT2M</Delay>

@@ -3,7 +3,7 @@ Description=Clean safe WSL worktrees, build artifacts, caches, and temp files
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/wsl-housekeeping --apply --daily-when-idle
+ExecStart=%h/.local/bin/wsl-housekeeping --apply --daily-when-idle --interval-hours 0.4 --max-load 0.7
 Nice=19
 IOSchedulingClass=idle
 TimeoutStartSec=30min

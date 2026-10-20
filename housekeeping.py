@@ -784,8 +784,9 @@ def main(argv=None):
     parser.add_argument("--skip-tmp", action="store_true")
     parser.add_argument("--skip-idle-caches", action="store_true")
     parser.add_argument("--skip-archive", action="store_true", help="never remove worktrees that hold local work")
-    parser.add_argument("--daily-when-idle", action="store_true", help="for the timer: run only if the last successful --apply is 20+ hours old and the CPU is idle")
-    parser.add_argument("--max-load", type=float, default=0.25, help="with --daily-when-idle, maximum 5-minute load average per CPU (default: 0.25)")
+    parser.add_argument("--daily-when-idle", action="store_true", help="for the timer: run only if the last successful --apply is at least --interval-hours old and the CPU load is within --max-load")
+    parser.add_argument("--interval-hours", type=float, default=20, help="with --daily-when-idle, minimum hours since the last successful --apply (default: 20)")
+    parser.add_argument("--max-load", type=float, default=0.7, help="with --daily-when-idle, maximum 5-minute load average per CPU (default: 0.7)")
     args = parser.parse_args(argv)
     if min(args.days, args.artifact_days, args.rust_cache_days, args.rust_target_max_gib, args.cache_days, args.tmp_days, args.cache_max_gib, args.tmp_max_gib, args.vhd_budget_gib, args.archive_days, args.archive_max_gib, args.idle_cache_days) < 1:
         parser.error("age and size limits must be at least one")
@@ -802,7 +803,7 @@ def main(argv=None):
             print("SKIP: another housekeeping run is active")
             return 0
         stamp = state / "last-success"
-        if args.daily_when_idle and (reason := due_skip_reason(stamp, 20, args.max_load, 72)):
+        if args.daily_when_idle and (reason := due_skip_reason(stamp, args.interval_hours, args.max_load, 72)):
             print(f"SKIP: {reason}")
             return 0
         ledger = DeletionLedger(state) if args.apply else None

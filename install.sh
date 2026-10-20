@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install daily housekeeping for the current user. Does not need root.
+# Install housekeeping and its user timer for the current user. Does not need root.
 set -euo pipefail
 
 if (( EUID == 0 )); then
@@ -27,4 +27,4 @@ install -m 0644 -- "$source_dir/systemd/user/wsl-housekeeping.timer" "$unit_dir/
 systemd-analyze --user verify "$unit_dir/wsl-housekeeping.service" "$unit_dir/wsl-housekeeping.timer"
 systemctl --user daemon-reload
 systemctl --user enable --now wsl-housekeeping.timer
-echo 'Installed daily housekeeping. Preview with ~/.local/bin/wsl-housekeeping.'
+echo 'Installed housekeeping timer. Preview with ~/.local/bin/wsl-housekeeping.'
